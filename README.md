@@ -101,3 +101,7 @@ O teste sobe o servidor via stdio, como um cliente MCP faria, e chama cada ferra
 ## Aviso
 
 Este é um projeto independente e não é oficial. Os resultados vêm da API da calculadora e servem para simulação e apoio. Confira sempre a legislação e as orientações oficiais.
+
+## Licença
+
+Distribuído sob a licença MIT. Veja o arquivo [LICENSE](LICENSE).
