@@ -1,6 +1,6 @@
 [project]
 name = "mcp-calculadora-rtc"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server para a Calculadora de Tributos RTC (CBS, IBS e Imposto Seletivo - LC 214/2025)."
 requires-python = ">=3.10"
 dependencies = [
@@ -17,4 +17,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["server"]
+py-modules = ["server", "registro"]

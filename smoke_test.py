@@ -1,6 +1,9 @@
 """Smoke test: sobe o servidor via stdio (como o Claude faz) e chama cada ferramenta.
 
-Se a API estiver parada, o próprio MCP a inicia. Uso:  python smoke_test.py
+Se a API estiver parada, o próprio MCP a inicia.
+
+Uso:  python smoke_test.py                       (testa o server.py)
+      python smoke_test.py caminho\\calculadora-rtc-mcp.exe   (testa o executável instalado)
 """
 
 from __future__ import annotations
@@ -51,9 +54,12 @@ CASOS: list[tuple[str, dict]] = [
 
 
 async def main() -> int:
-    params = StdioServerParameters(
-        command=sys.executable, args=[str(HERE / "server.py")], env={"RTC_NOTIFY": "0"},
-    )
+    if len(sys.argv) > 1:
+        comando, args = sys.argv[1], []
+    else:
+        comando, args = sys.executable, [str(HERE / "server.py")]
+    print(f"Testando: {comando} {' '.join(args)}")
+    params = StdioServerParameters(command=comando, args=args, env={"RTC_NOTIFY": "0"})
     falhas = 0
     async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
         await s.initialize()

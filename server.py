@@ -38,7 +38,12 @@ from pydantic import BaseModel, Field
 
 
 HERE = Path(__file__).parent
-load_dotenv(HERE / ".env")
+# Instalado (executável do PyInstaller): <instalação>\mcp\calculadora-rtc-mcp.exe,
+# com o Java em <instalação>\runtime e a API em <instalação>\api.
+EMPACOTADO = bool(getattr(sys, "frozen", False))
+APP_DIR = Path(sys.executable).parent if EMPACOTADO else HERE
+RAIZ_INSTALACAO = APP_DIR.parent if EMPACOTADO else None
+load_dotenv(APP_DIR / ".env")
 
 
 def _flag(nome: str, padrao: bool) -> bool:
@@ -57,7 +62,10 @@ RTC_AUTOSTART = _flag("RTC_AUTOSTART", True)
 RTC_STOP_ON_EXIT = _flag("RTC_STOP_ON_EXIT", True)
 RTC_NOTIFY = _flag("RTC_NOTIFY", True)
 RTC_STARTUP_TIMEOUT = float(os.getenv("RTC_STARTUP_TIMEOUT", "180"))
-RTC_API_DIR = Path(os.getenv("RTC_API_DIR") or (HERE.parent / "calculadora-rtc-regime-regular"))
+RTC_API_DIR = Path(
+    os.getenv("RTC_API_DIR")
+    or (RAIZ_INSTALACAO / "api" if RAIZ_INSTALACAO else HERE.parent / "calculadora-rtc-regime-regular")
+)
 RTC_HOME = Path(os.getenv("RTC_HOME") or (Path.home() / ".calculadora-rtc"))
 API_LOG = RTC_HOME / "api.log"
 
@@ -108,7 +116,8 @@ def _url_local() -> bool:
 
 def _encontrar_java() -> str | None:
     exe = "java.exe" if os.name == "nt" else "java"
-    for home in (os.getenv("RTC_JAVA_HOME"), os.getenv("JAVA_HOME")):
+    embutido = str(RAIZ_INSTALACAO / "runtime") if RAIZ_INSTALACAO else None
+    for home in (os.getenv("RTC_JAVA_HOME"), embutido, os.getenv("JAVA_HOME")):
         if home and (Path(home) / "bin" / exe).exists():
             return str(Path(home) / "bin" / exe)
     if os.name == "nt":
@@ -220,16 +229,22 @@ class GerenciadorApi:
         tmp = RTC_HOME / "tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         porta = urlparse(RTC_BASE_URL).port or 8080
-        jvm = [f"-Djava.io.tmpdir={tmp}", "-Djava.net.preferIPv4Stack=true"]
-        jar = RTC_API_DIR / "target" / "api-regime-geral.jar"
-        if jar.exists():
+        # Windows: o Java cria um socket interno na pasta TEMP; com caminho longo dá
+        # "Unable to establish loopback connection". Por isso uma pasta temporária curta.
+        jvm = [f"-Djava.io.tmpdir={tmp}", f"-Djdk.net.unixdomain.tmpdir={tmp}",
+               "-Djava.net.preferIPv4Stack=true"]
+        porta_gestao = 9101 if porta == 8080 else porta + 1021  # padrão da API: 8080 -> 9101
+        jar = next((j for j in (RTC_API_DIR / "api-regime-geral.jar",
+                                RTC_API_DIR / "target" / "api-regime-geral.jar") if j.exists()), None)
+        if jar:
             cmd = [java, *jvm, "-Dspring.profiles.active=offline", "-jar", str(jar),
-                   f"--server.port={porta}"]
+                   f"--server.port={porta}", f"--management.server.port={porta_gestao}"]
         else:
             mvnw = RTC_API_DIR / ("mvnw.cmd" if os.name == "nt" else "mvnw")
             cmd = [str(mvnw), "spring-boot:run", "-Dspring-boot.run.profiles=offline",
                    f"-Dspring-boot.run.jvmArguments={' '.join(jvm)}",
-                   f"-Dspring-boot.run.arguments=--server.port={porta}"]
+                   f"-Dspring-boot.run.arguments=--server.port={porta},"
+                   f"--management.server.port={porta_gestao}"]
 
         env = os.environ.copy()
         env["JAVA_HOME"] = str(Path(java).parent.parent)
@@ -882,6 +897,10 @@ def _ao_conectar() -> None:
 
 
 def main() -> None:
+    if "--registrar" in sys.argv or "--remover-registro" in sys.argv:
+        import registro
+        sys.exit(registro.registrar() if "--registrar" in sys.argv else registro.remover_registro())
+
     log.info("MCP iniciado. API: %s | início automático: %s", RTC_BASE_URL, RTC_AUTOSTART)
     threading.Thread(target=_ao_conectar, daemon=True).start()
     try:

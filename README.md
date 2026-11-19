@@ -6,6 +6,37 @@ Ele envolve a API REST do projeto [calculadora-rtc-regime-regular](https://githu
 
 > "Qual cClassTrib uso para venda de arroz? A NCM 10063021 é compatível? Calcule CBS e IBS de R$ 100 em Porto Alegre em março de 2027."
 
+## Instalação fácil (Windows)
+
+Para quem só quer usar, sem programar:
+
+1. Baixe o **`CalculadoraRTC-Claude-Setup-<versão>.exe`** na página de [Releases](https://github.com/bispado/mcp-calculadora-rtc/releases).
+2. Execute e clique em **Avançar** até concluir. Não precisa de administrador.
+   - Se o Windows mostrar *"O Windows protegeu o computador"*, clique em **Mais informações** e depois em **Executar assim mesmo**. O instalador não tem assinatura digital paga.
+3. Feche o Claude Desktop por completo (ícone perto do relógio → **Sair**) e abra de novo.
+4. Pergunte ao Claude: *"qual o status da calculadora?"*
+
+O instalador já traz **tudo**: o MCP compilado (sem Python), um Java próprio enxuto (sem instalar Java), a API e o banco de dados já gerado. Ele registra a calculadora no Claude Desktop e, se existir, no Claude Code. Para desinstalar, vá em **Configurações do Windows → Aplicativos**; a desinstalação remove também o registro no Claude.
+
+### Gerar o instalador
+
+Na máquina de desenvolvimento, com JDK 21, o `.venv` do projeto e o [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup --scope user`) instalados:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build.ps1 -Version 0.2.0
+```
+
+O script gera o JAR e o banco da API, se faltarem, cria o Java enxuto com `jlink`, compila o MCP com PyInstaller e monta o instalador em `installer\output\`.
+
+Para registrar ou remover manualmente:
+
+```powershell
+calculadora-rtc-mcp.exe --registrar
+calculadora-rtc-mcp.exe --remover-registro
+```
+
+Em desenvolvimento, use `python server.py --registrar`.
+
 ## Ferramentas
 
 | Ferramenta | O que faz | Endpoint da API |
@@ -37,7 +68,7 @@ Nas ferramentas com data, a data padrão é hoje. As listagens grandes (classifi
 - Endpoints de nicho: pedágio, transferências a entes governamentais, redutores de compra governamental e a família do Imposto Seletivo (`/is`, `/imposto-seletivo`).
 - `/versao/status` e `/dados-abertos/versao`, que são de monitoramento.
 
-## Requisitos
+## Requisitos (instalação manual, para desenvolvimento)
 
 - Python 3.10 ou superior.
 - Java 21 ou superior.

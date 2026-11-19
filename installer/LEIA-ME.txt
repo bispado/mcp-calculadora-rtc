@@ -1,0 +1,44 @@
+﻿CALCULADORA RTC PARA O CLAUDE
+=============================
+
+O que é
+-------
+Uma extensão (MCP) que deixa o Claude calcular CBS, IBS e Imposto Seletivo
+da Reforma Tributária do Consumo (LC 214/2025) e consultar as tabelas
+oficiais: CST, cClassTrib, NCM, NBS, alíquotas, municípios e fundamentação legal.
+
+Como começar
+------------
+1. Feche o Claude Desktop por completo: clique com o botão direito no ícone do
+   Claude perto do relógio do Windows e escolha "Sair".
+2. Abra o Claude Desktop de novo.
+3. Confira em "+" > "Conectores" que a "calculadora-rtc" aparece e está ligada.
+4. Pergunte ao Claude, por exemplo:
+   - "Qual o status da calculadora?"
+   - "Qual cClassTrib uso para venda de arroz?"
+   - "Calcule CBS e IBS de uma venda de R$ 100 de arroz em Porto Alegre em março de 2027."
+
+O que acontece por trás
+-----------------------
+- Ao conectar, aparece um aviso no canto da tela: "Claude conectado à Calculadora RTC".
+- A calculadora (um programa Java que já vem incluído) liga sozinha em uns 10 a 20
+  segundos. Quando estiver pronta, aparece o aviso "Calculadora RTC pronta".
+- Ao fechar o Claude, a calculadora desliga sozinha.
+
+Se algo der errado
+------------------
+- Pergunte ao Claude: "qual o status da calculadora?" — ele mostra o problema.
+- O registro da calculadora fica em:  %USERPROFILE%\.calculadora-rtc\api.log
+- Se usar também o Claude Code, ele já foi configurado (se estava instalado).
+
+Desinstalar
+-----------
+Configurações do Windows > Aplicativos > "Calculadora RTC para o Claude" > Desinstalar.
+A conexão com o Claude é removida junto.
+
+Aviso
+-----
+Projeto independente, não oficial. Os resultados servem para simulação e apoio;
+confira sempre a legislação e as orientações oficiais.
+
+Mais informações: https://github.com/bispado/mcp-calculadora-rtc
