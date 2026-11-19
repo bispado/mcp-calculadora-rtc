@@ -6,19 +6,29 @@ enxuto de ferramentas: cálculo de tributos, base de cálculo unificada e as
 consultas às tabelas oficiais (CST, cClassTrib, NCM, NBS, alíquotas, municípios,
 fundamentação legal e NFS-e).
 
-A API precisa estar no ar (por padrão em http://localhost:8080/api).
+Quando o Claude conecta, o servidor avisa no Windows e, se a API Java (local) estiver
+parada, sobe a API sozinho. Quando o Claude desconecta, a API iniciada por ele é encerrada.
 
 Run with:  python server.py    (stdio transport, suitable for Claude Code)
 """
 
 from __future__ import annotations
 
+import atexit
+import glob
+import logging
 import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
 import unicodedata
 import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -30,14 +40,274 @@ from pydantic import BaseModel, Field
 HERE = Path(__file__).parent
 load_dotenv(HERE / ".env")
 
+
+def _flag(nome: str, padrao: bool) -> bool:
+    valor = os.getenv(nome)
+    if valor is None:
+        return padrao
+    return valor.strip().lower() not in ("0", "false", "no", "nao", "não", "off", "")
+
+
 RTC_BASE_URL = os.getenv("RTC_BASE_URL", "http://localhost:8080/api").rstrip("/")
 RTC_HTTP_TIMEOUT = float(os.getenv("RTC_HTTP_TIMEOUT", "60"))
 RTC_MAX_RESULTS = int(os.getenv("RTC_MAX_RESULTS", "50"))
 
+# Ciclo de vida da API Java
+RTC_AUTOSTART = _flag("RTC_AUTOSTART", True)
+RTC_STOP_ON_EXIT = _flag("RTC_STOP_ON_EXIT", True)
+RTC_NOTIFY = _flag("RTC_NOTIFY", True)
+RTC_STARTUP_TIMEOUT = float(os.getenv("RTC_STARTUP_TIMEOUT", "180"))
+RTC_API_DIR = Path(os.getenv("RTC_API_DIR") or (HERE.parent / "calculadora-rtc-regime-regular"))
+RTC_HOME = Path(os.getenv("RTC_HOME") or (Path.home() / ".calculadora-rtc"))
+API_LOG = RTC_HOME / "api.log"
+
 CALC = f"{RTC_BASE_URL}/calculadora"
 DADOS = f"{CALC}/dados-abertos"
 
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="[calculadora-rtc] %(message)s")
+log = logging.getLogger("calculadora-rtc")
+
 mcp = FastMCP("calculadora-rtc")
+
+
+# ------------------------------------------------------- AVISOS NO WINDOWS
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _notificar(titulo: str, mensagem: str) -> None:
+    """Mostra um aviso (balão) na bandeja do Windows, sem bloquear o MCP."""
+    log.info("%s: %s", titulo, mensagem)
+    if not RTC_NOTIFY or os.name != "nt":
+        return
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; "
+        "$n = New-Object System.Windows.Forms.NotifyIcon; "
+        "$n.Icon = [System.Drawing.SystemIcons]::Information; "
+        "$n.BalloonTipTitle = $env:RTC_AVISO_TITULO; $n.BalloonTipText = $env:RTC_AVISO_TEXTO; "
+        "$n.Visible = $true; $n.ShowBalloonTip(6000); Start-Sleep -Seconds 7; $n.Dispose()"
+    )
+    env = os.environ.copy()
+    env["RTC_AVISO_TITULO"] = titulo
+    env["RTC_AVISO_TEXTO"] = mensagem
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW,
+        )
+    except OSError as exc:
+        log.warning("Não foi possível mostrar o aviso: %s", exc)
+
+
+# ------------------------------------------------- CICLO DE VIDA DA API JAVA
+
+def _url_local() -> bool:
+    return (urlparse(RTC_BASE_URL).hostname or "") in ("localhost", "127.0.0.1", "::1")
+
+
+def _encontrar_java() -> str | None:
+    exe = "java.exe" if os.name == "nt" else "java"
+    for home in (os.getenv("RTC_JAVA_HOME"), os.getenv("JAVA_HOME")):
+        if home and (Path(home) / "bin" / exe).exists():
+            return str(Path(home) / "bin" / exe)
+    if os.name == "nt":
+        for padrao in (
+            r"C:\Program Files\Eclipse Adoptium\jdk-2*\bin\java.exe",
+            r"C:\Program Files\Microsoft\jdk-2*\bin\java.exe",
+            r"C:\Program Files\Java\jdk-2*\bin\java.exe",
+        ):
+            achados = sorted(glob.glob(padrao), reverse=True)
+            if achados:
+                return achados[0]
+    return shutil.which("java")
+
+
+def _job_que_mata_ao_fechar() -> Any:
+    """Windows: cria um Job Object que encerra os processos dele quando o MCP morre.
+
+    Assim a API não fica órfã mesmo se o Claude matar o MCP à força.
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class Basic(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", Basic), ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = Extended()
+    info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        return None
+    return k32, job
+
+
+class GerenciadorApi:
+    """Sobe, acompanha e encerra a API Java local da calculadora."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._aviso_lock = threading.Lock()
+        self.proc: subprocess.Popen | None = None
+        self.estado = "verificando"
+        self.erro: str | None = None
+        self.iniciada_em: float | None = None
+        self.pronta_em: float | None = None
+        self._avisou_pronta = False
+        self._job: Any = None
+
+    def online(self) -> bool:
+        try:
+            return httpx.get(f"{DADOS}/versao", timeout=3).status_code < 500
+        except httpx.HTTPError:
+            return False
+
+    def iniciada_por_este_mcp(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def garantir(self, esperar: bool = True) -> bool:
+        """Garante a API no ar. Sobe a API se preciso; com `esperar`, aguarda ficar pronta."""
+        with self._lock:
+            if self.online():
+                self.estado, self.erro = "online", None
+                return True
+            if not RTC_AUTOSTART or not _url_local():
+                self.estado = "offline"
+                self.erro = "API fora do ar e o início automático está desligado (RTC_AUTOSTART=0)." \
+                    if not RTC_AUTOSTART else f"API remota fora do ar: {RTC_BASE_URL}"
+                return False
+            if not self.iniciada_por_este_mcp() and not self._iniciar():
+                return False
+        return self._aguardar() if esperar else False
+
+    def _iniciar(self) -> bool:
+        java = _encontrar_java()
+        if not java:
+            return self._falhou("Java 21+ não encontrado. Instale o JDK ou defina RTC_JAVA_HOME.")
+        if not RTC_API_DIR.exists():
+            return self._falhou(f"Pasta da API não encontrada: {RTC_API_DIR}. Defina RTC_API_DIR.")
+        if not (RTC_API_DIR / "calculadora" / "db" / "calculadora-pro.db").exists():
+            return self._falhou(
+                "Banco da API não gerado. Na pasta da API rode: mvnw.cmd flyway:migrate "
+                "\"-Dflyway.configFiles=flyway\\flyway-pro.conf\"")
+
+        tmp = RTC_HOME / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        porta = urlparse(RTC_BASE_URL).port or 8080
+        jvm = [f"-Djava.io.tmpdir={tmp}", "-Djava.net.preferIPv4Stack=true"]
+        jar = RTC_API_DIR / "target" / "api-regime-geral.jar"
+        if jar.exists():
+            cmd = [java, *jvm, "-Dspring.profiles.active=offline", "-jar", str(jar),
+                   f"--server.port={porta}"]
+        else:
+            mvnw = RTC_API_DIR / ("mvnw.cmd" if os.name == "nt" else "mvnw")
+            cmd = [str(mvnw), "spring-boot:run", "-Dspring-boot.run.profiles=offline",
+                   f"-Dspring-boot.run.jvmArguments={' '.join(jvm)}",
+                   f"-Dspring-boot.run.arguments=--server.port={porta}"]
+
+        env = os.environ.copy()
+        env["JAVA_HOME"] = str(Path(java).parent.parent)
+        env["TEMP"] = env["TMP"] = str(tmp)
+        flags = (subprocess.CREATE_NEW_PROCESS_GROUP | _NO_WINDOW) if os.name == "nt" else 0
+
+        RTC_HOME.mkdir(parents=True, exist_ok=True)
+        saida = open(API_LOG, "ab")
+        saida.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} iniciando: {' '.join(cmd)}\n".encode())
+        saida.flush()
+        try:
+            self.proc = subprocess.Popen(
+                cmd, cwd=RTC_API_DIR, stdin=subprocess.DEVNULL, stdout=saida,
+                stderr=subprocess.STDOUT, env=env, creationflags=flags,
+            )
+        except OSError as exc:
+            return self._falhou(f"Não foi possível iniciar a API: {exc}")
+        finally:
+            saida.close()
+
+        if RTC_STOP_ON_EXIT and os.name == "nt":
+            try:
+                self._job = self._job or _job_que_mata_ao_fechar()
+                if self._job:
+                    k32, job = self._job
+                    k32.AssignProcessToJobObject(job, int(self.proc._handle))  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 - segue sem o job, com atexit
+                log.warning("Sem vínculo de encerramento automático: %s", exc)
+
+        self.estado, self.erro = "iniciando", None
+        self.iniciada_em, self.pronta_em, self._avisou_pronta = time.time(), None, False
+        log.info("API Java iniciada (PID %s). Log: %s", self.proc.pid, API_LOG)
+        return True
+
+    def _aguardar(self) -> bool:
+        limite = time.time() + RTC_STARTUP_TIMEOUT
+        while time.time() < limite:
+            if self.online():
+                self.estado, self.erro = "online", None
+                with self._aviso_lock:
+                    if not self._avisou_pronta and self.iniciada_em:
+                        self._avisou_pronta = True
+                        self.pronta_em = time.time()
+                        _notificar("Calculadora RTC pronta",
+                                   f"API Java no ar em {self.pronta_em - self.iniciada_em:.0f}s. "
+                                   "O Claude já pode calcular tributos.")
+                return True
+            if self.proc is not None and self.proc.poll() is not None:
+                return self._falhou(
+                    f"A API Java encerrou na subida (código {self.proc.returncode}). Veja {API_LOG}.",
+                    avisar=True)
+            time.sleep(2)
+        return self._falhou(f"A API não respondeu em {RTC_STARTUP_TIMEOUT:.0f}s. Veja {API_LOG}.",
+                            avisar=True)
+
+    def _falhou(self, motivo: str, avisar: bool = False) -> bool:
+        self.estado, self.erro = "erro", motivo
+        log.error(motivo)
+        if avisar:
+            _notificar("Calculadora RTC: falha na API", motivo)
+        return False
+
+    def parar(self) -> None:
+        if not RTC_STOP_ON_EXIT or not self.iniciada_por_este_mcp():
+            return
+        log.info("Encerrando a API Java (PID %s).", self.proc.pid)
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=15)
+        except Exception:  # noqa: BLE001
+            try:
+                self.proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+api = GerenciadorApi()
+atexit.register(api.parar)
 
 
 # ------------------------------------------------------------------------ HTTP
@@ -46,17 +316,26 @@ def _hoje() -> str:
     return date.today().isoformat()
 
 
+def _enviar(method: str, url: str, params: dict, json: Any) -> httpx.Response:
+    with httpx.Client(timeout=RTC_HTTP_TIMEOUT) as client:
+        return client.request(method, url, params=params, json=json)
+
+
 def _request(method: str, url: str, *, params: dict | None = None, json: Any = None) -> Any:
     params = {k: v for k, v in (params or {}).items() if v is not None}
     try:
-        with httpx.Client(timeout=RTC_HTTP_TIMEOUT) as client:
-            resp = client.request(method, url, params=params, json=json)
+        try:
+            resp = _enviar(method, url, params, json)
+        except httpx.ConnectError:
+            # API fora do ar: sobe (ou espera subir) e tenta de novo uma vez.
+            if not api.garantir(esperar=True):
+                raise ToolError(
+                    f"A API da calculadora não está disponível em {RTC_BASE_URL}. {api.erro or ''} "
+                    f"Log da API: {API_LOG}"
+                ) from None
+            resp = _enviar(method, url, params, json)
     except httpx.ConnectError as exc:
-        raise ToolError(
-            f"Não foi possível conectar à API da calculadora em {RTC_BASE_URL}. "
-            "Verifique se ela está rodando (mvnw.cmd spring-boot:run "
-            "\"-Dspring-boot.run.profiles=offline\") ou ajuste RTC_BASE_URL."
-        ) from exc
+        raise ToolError(f"Não foi possível conectar à API da calculadora em {RTC_BASE_URL}.") from exc
     except httpx.TimeoutException as exc:
         raise ToolError(f"Tempo esgotado ao chamar {url}.") from exc
 
@@ -538,8 +817,77 @@ def nfse_local_operacao(c_ind_op: str, data: str | None = None) -> Any:
                           dataOcorrenciaFatoGerador=data or _hoje()))
 
 
+# ---------------------------------------------------------------------- STATUS
+
+@mcp.tool()
+def status_conexao(iniciar_se_offline: bool = True) -> Any:
+    """Mostra se está tudo conectado: o MCP ligado ao Claude, a API Java da calculadora
+    (online, iniciando, offline ou erro), a versão do banco de dados e onde ver os logs.
+
+    Use quando o usuário perguntar se a calculadora está funcionando, ou quando outra
+    ferramenta falhar por conexão. Se a API estiver parada, ela é iniciada em segundo plano.
+
+    Args:
+        iniciar_se_offline: Se a API estiver parada, iniciar em segundo plano (padrão: sim).
+    """
+    online = api.online()
+    if online:
+        api.estado = "online"
+    elif iniciar_se_offline and api.estado != "iniciando":
+        threading.Thread(target=api.garantir, kwargs={"esperar": True}, daemon=True).start()
+        time.sleep(0.5)
+
+    if online:
+        estado = "online"
+    elif api.iniciada_por_este_mcp():
+        estado = "iniciando"
+    else:
+        estado = api.estado
+    out: dict[str, Any] = {
+        "mcp": "conectado ao Claude",
+        "api": estado,
+        "api_url": RTC_BASE_URL,
+        "inicio_automatico": RTC_AUTOSTART and _url_local(),
+        "encerra_api_ao_sair": RTC_STOP_ON_EXIT,
+        "api_iniciada_por_este_mcp": api.iniciada_por_este_mcp(),
+    }
+    if api.iniciada_por_este_mcp():
+        out["api_pid"] = api.proc.pid
+        if api.pronta_em and api.iniciada_em:
+            out["api_subiu_em_segundos"] = round(api.pronta_em - api.iniciada_em, 1)
+    if online:
+        try:
+            out["versao"] = _get(f"{DADOS}/versao")
+        except ToolError as exc:
+            out["versao"] = {"erro": str(exc)}
+    elif estado == "iniciando" and api.iniciada_em:
+        out["iniciando_ha_segundos"] = round(time.time() - api.iniciada_em)
+        out["dica"] = "A API leva uns 15 a 40 segundos para subir. Consulte de novo em instantes."
+    if api.erro:
+        out["erro"] = api.erro
+    out["log_api"] = str(API_LOG)
+    return out
+
+
+def _ao_conectar() -> None:
+    if api.online():
+        api.estado = "online"
+        _notificar("Claude conectado à Calculadora RTC", "MCP ativo e API Java já está no ar.")
+        return
+    if RTC_AUTOSTART and _url_local():
+        _notificar("Claude conectado à Calculadora RTC", "MCP ativo. Iniciando a API Java...")
+    else:
+        _notificar("Claude conectado à Calculadora RTC", "MCP ativo, mas a API está fora do ar.")
+    api.garantir(esperar=True)
+
+
 def main() -> None:
-    mcp.run()
+    log.info("MCP iniciado. API: %s | início automático: %s", RTC_BASE_URL, RTC_AUTOSTART)
+    threading.Thread(target=_ao_conectar, daemon=True).start()
+    try:
+        mcp.run()
+    finally:
+        api.parar()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Smoke test: sobe o servidor via stdio (como o Claude faz) e chama cada ferramenta.
 
-Requer a API da calculadora rodando. Uso:  python smoke_test.py
+Se a API estiver parada, o próprio MCP a inicia. Uso:  python smoke_test.py
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ HERE = Path(__file__).parent
 DATA = "2027-03-10"
 
 CASOS: list[tuple[str, dict]] = [
-    ("listar_ufs", {}),
+    ("listar_ufs", {}),  # primeira chamada: espera a API subir, se preciso
+    ("status_conexao", {}),
     ("listar_municipios", {"sigla_uf": "RS", "busca": "porto alegre"}),
     ("listar_tipos_dfe", {"data": DATA}),
     ("listar_situacoes_tributarias", {"data": DATA, "sigla_dfe": "NFE"}),
@@ -50,7 +51,9 @@ CASOS: list[tuple[str, dict]] = [
 
 
 async def main() -> int:
-    params = StdioServerParameters(command=sys.executable, args=[str(HERE / "server.py")])
+    params = StdioServerParameters(
+        command=sys.executable, args=[str(HERE / "server.py")], env={"RTC_NOTIFY": "0"},
+    )
     falhas = 0
     async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
