@@ -16,7 +16,9 @@ Para quem só quer usar, sem programar:
 3. Feche o Claude Desktop por completo (ícone perto do relógio → **Sair**) e abra de novo.
 4. Pergunte ao Claude: *"qual o status da calculadora?"*
 
-O instalador já traz **tudo**: o MCP compilado (sem Python), um Java próprio enxuto (sem instalar Java), a API e o banco de dados já gerado. Ele registra a calculadora no Claude Desktop e, se existir, no Claude Code. Para desinstalar, vá em **Configurações do Windows → Aplicativos**; a desinstalação remove também o registro no Claude.
+O instalador já traz **tudo**: o MCP compilado (sem Python), um Java próprio enxuto (sem instalar Java), a API e o banco de dados já gerado. Ele registra a calculadora no app do Claude e, se existir, no Claude Code. Para desinstalar, vá em **Configurações do Windows → Aplicativos**; a desinstalação remove também o registro no Claude.
+
+> A calculadora não apareceu em **+ → Conectores**? Veja [Não aparece em Conectores?](#não-aparece-em-conectores).
 
 ### Gerar o instalador
 
@@ -96,7 +98,7 @@ A saída da API vai para `~/.calculadora-rtc/api.log`.
 
 > O MCP já aplica a correção do erro `Unable to establish loopback connection` do Java no Windows: ele usa um diretório temporário curto, `~/.calculadora-rtc/tmp`.
 
-## Instalação
+## Instalação manual (desenvolvimento)
 
 ```bash
 git clone https://github.com/bispado/mcp-calculadora-rtc.git
@@ -108,7 +110,58 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-Opcional: copie `.env.example` para `.env` e ajuste a URL da API.
+### Registrar no Claude
+
+O Claude guarda a lista de MCPs em **dois lugares diferentes**, e cada parte do Claude lê um deles:
+
+| Onde | Quem lê | Como um MCP entra lá |
+|---|---|---|
+| `claude_desktop_config.json` | App do Claude: chat, menu **+ → Conectores** e aba Code | Pelo app (**Configurações → Desenvolvedor → Editar configuração**) ou editando o arquivo |
+| `~/.claude.json` | Claude Code (terminal e aba Code do app) | `claude mcp add` |
+
+Um MCP registrado só com `claude mcp add` funciona nas sessões do Claude Code, mas **não aparece em Conectores nem no chat comum do app**.
+
+Por isso, o jeito recomendado é este comando, que registra nos dois lugares de uma vez:
+
+```powershell
+.venv\Scripts\python.exe server.py --registrar
+```
+
+Ele acha sozinho o arquivo certo do app. Esse arquivo muda de lugar conforme a instalação: `%APPDATA%\Claude\` no instalador comum, `%LOCALAPPDATA%\Claude-Data\...` nas versões novas ou a pasta da Microsoft Store. O comando também ignora pastas antigas que o Claude abandonou e mantém o resto do arquivo como está. Na primeira alteração, ele guarda um backup do arquivo original em `claude_desktop_config.json.bak-calculadora-rtc`.
+
+Depois, **feche o Claude por completo** (ícone perto do relógio → **Sair**) e abra de novo. Para desfazer:
+
+```powershell
+.venv\Scripts\python.exe server.py --remover-registro
+```
+
+#### Alternativa: editar o arquivo do app à mão
+
+Abra o arquivo pelo próprio app, em **Configurações → Desenvolvedor → Editar configuração**. Assim você abre o arquivo certo em qualquer tipo de instalação. Dentro de `mcpServers`, acrescente:
+
+```json
+"calculadora-rtc": {
+  "command": "C:\\caminho\\mcp-calculadora-rtc\\.venv\\Scripts\\python.exe",
+  "args": ["C:\\caminho\\mcp-calculadora-rtc\\server.py"],
+  "env": { "PYTHONIOENCODING": "utf-8" }
+}
+```
+
+Os caminhos são os da **sua** máquina, onde você criou o `.venv`. Não copie os caminhos de outra pessoa. Salve e reinicie o app.
+
+#### Alternativa: só o Claude Code no terminal
+
+Se você usa apenas o Claude Code pelo terminal:
+
+```bash
+claude mcp add --scope user calculadora-rtc -- <caminho>/.venv/Scripts/python.exe <caminho>/server.py
+```
+
+No Linux e no macOS, use `.venv/bin/python`. Lembre que, desse jeito, a calculadora **não** aparece no app do Claude.
+
+### Configuração
+
+Opcional: copie `.env.example` para `.env` e ajuste os valores.
 
 | Variável | Padrão | Descrição |
 |---|---|---|
@@ -123,29 +176,20 @@ Opcional: copie `.env.example` para `.env` e ajuste a URL da API.
 | `RTC_STARTUP_TIMEOUT` | `180` | Segundos de espera pela API subir |
 | `RTC_HOME` | `~/.calculadora-rtc` | Pasta do log e do diretório temporário do Java |
 
-## Uso no Claude Code
+## Não aparece em Conectores?
 
-```bash
-claude mcp add calculadora-rtc -- <caminho>/.venv/Scripts/python.exe <caminho>/server.py
-```
+Se a calculadora funciona no Claude Code mas não aparece em **+ → Conectores** no app, ela está registrada só no cadastro do Claude Code, e não no do app (veja [Registrar no Claude](#registrar-no-claude)). As causas mais comuns:
 
-No Linux/macOS, use `.venv/bin/python`.
+| Causa | Como resolver |
+|---|---|
+| Foi registrada só com `claude mcp add` | Rode `server.py --registrar` (instalação manual) ou o instalador de novo |
+| O Claude estava aberto durante a instalação e regravou o arquivo, apagando o registro | Feche o Claude (**Sair**) e rode o instalador de novo |
+| O app do Claude foi instalado **depois** da calculadora | Rode o instalador de novo, com o Claude fechado |
+| O app não foi reiniciado depois do registro | Feche por completo (**Sair**, e não só fechar a janela) e abra de novo |
+| O arquivo do app está num local que o registro não conhece | Abra **Configurações → Desenvolvedor → Editar configuração** e acrescente a entrada à mão (veja [acima](#alternativa-editar-o-arquivo-do-app-à-mão)). No instalador, o executável fica em `%LOCALAPPDATA%\Programs\Calculadora RTC\mcp\calculadora-rtc-mcp.exe`, sem `args` |
+| A empresa bloqueia MCPs locais por política | Fale com o administrador do Claude da sua organização |
 
-## Uso no Claude Desktop
-
-Em `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "calculadora-rtc": {
-      "command": "C:\\caminho\\mcp-calculadora-rtc\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\caminho\\mcp-calculadora-rtc\\server.py"],
-      "env": { "RTC_BASE_URL": "http://localhost:8080/api" }
-    }
-  }
-}
-```
+Para conferir o que está registrado: no app, **Configurações → Desenvolvedor** lista os servidores locais e o estado de cada um; no terminal, use `claude mcp list`.
 
 ## Teste
 
